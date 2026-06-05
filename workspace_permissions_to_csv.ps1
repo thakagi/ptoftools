@@ -19,14 +19,26 @@ catch {
 }
 
 # Disable token cache persistence to avoid MSAL assembly version conflicts
-Disable-AzContextAutosave -Scope Process -ErrorAction SilentlyContinue | Out-Null
+# (may fail on some environments with SafeConfigManager - that's OK)
+Disable-AzContextAutosave -Scope Process -ErrorAction SilentlyContinue 2>$null | Out-Null
 
 try {
     Connect-AzAccount -UseDeviceAuthentication -ErrorAction Stop | Out-Null
 }
 catch {
-    Write-Error "Failed to authenticate with Azure."
-    throw
+    # If Disable-AzContextAutosave caused SafeConfigManager issues, retry without it
+    if ($_.Exception.Message -match "SafeConfigManager|safe mode") {
+        Write-Host "Retrying authentication without context autosave change..."
+        # Clear the broken context state and retry
+        try {
+            Clear-AzContext -Force -ErrorAction SilentlyContinue | Out-Null
+        } catch {}
+        Connect-AzAccount -UseDeviceAuthentication -ErrorAction Stop | Out-Null
+    }
+    else {
+        Write-Error "Failed to authenticate with Azure."
+        throw
+    }
 }
 
 try {
