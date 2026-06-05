@@ -1,5 +1,6 @@
 param (
-    [switch]$ExcludePersonalWorkspaces
+    [switch]$ExcludePersonalWorkspaces,
+    [string]$CapacityId
 )
 
 $ErrorActionPreference = "Continue"
@@ -60,6 +61,33 @@ $headers = @{
     "Content-Type"  = "application/json"
 }
 
+# Token refresh helper - refreshes token if older than 45 minutes
+$script:tokenAcquiredTime = Get-Date
+
+function Refresh-FabricToken {
+    $elapsed = (Get-Date) - $script:tokenAcquiredTime
+    if ($elapsed.TotalMinutes -ge 45) {
+        Write-Host "Access token nearing expiry. Refreshing..."
+        try {
+            $tokenResult = Get-AzAccessToken -ResourceUrl "https://api.fabric.microsoft.com" -ErrorAction Stop
+            if ($tokenResult.Token -is [System.Security.SecureString]) {
+                $script:accessToken = [System.Net.NetworkCredential]::new('', $tokenResult.Token).Password
+            } else {
+                $script:accessToken = $tokenResult.Token
+            }
+            $script:headers = @{
+                "Authorization" = "Bearer $script:accessToken"
+                "Content-Type"  = "application/json"
+            }
+            $script:tokenAcquiredTime = Get-Date
+            Write-Host "Token refreshed successfully."
+        }
+        catch {
+            Write-Warning "Failed to refresh token: $($_.Exception.Message)"
+        }
+    }
+}
+
 # ------------------------------------------------------------
 # Get all workspaces from Fabric Admin API (with pagination)
 # ------------------------------------------------------------
@@ -102,6 +130,12 @@ if ($ExcludePersonalWorkspaces) {
     $workspaces = $workspaces | Where-Object { $_.type -ne "Personal" }
 }
 
+# Optionally filter by Fabric capacity ID
+if ($CapacityId) {
+    $workspaces = $workspaces | Where-Object { $_.capacityId -eq $CapacityId }
+    Write-Host "Filtered to capacity $CapacityId : $($workspaces.Count) workspaces."
+}
+
 if (-not $workspaces -or $workspaces.Count -eq 0) {
     Write-Warning "No workspaces found."
     return
@@ -121,6 +155,9 @@ $currentIndex = 0
 foreach ($workspace in $workspaces) {
 
     $currentIndex++
+
+    # Refresh token if nearing expiry
+    Refresh-FabricToken
 
     $workspaceId   = $workspace.id
     $workspaceName = $workspace.name
@@ -160,7 +197,12 @@ foreach ($workspace in $workspaces) {
                     $statusCode = [int]$_.Exception.Response.StatusCode
                 }
 
-                if ($statusCode -eq 429 -and $retryCount -lt $maxRetries) {
+                if ($statusCode -eq 401 -and $retryCount -lt $maxRetries) {
+                    $retryCount++
+                    Write-Host "  Token expired (401). Refreshing and retrying ($retryCount/$maxRetries)..."
+                    Refresh-FabricToken
+                }
+                elseif ($statusCode -eq 429 -and $retryCount -lt $maxRetries) {
                     $retryCount++
                     # Parse Retry-After header or use exponential backoff
                     $retryAfter = $null
